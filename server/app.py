@@ -5,7 +5,7 @@ from flask_migrate import Migrate
 from marshmallow import ValidationError
 from sqlalchemy.exc import IntegrityError
 
-from models import *
+from models import db, Exercise, Workout, WorkoutExercise
 from schemas import (
     ExerciseDetailSchema,
     ExerciseSchema,
@@ -14,6 +14,7 @@ from schemas import (
     WorkoutSchema,
 )
 
+# --- App setup ---
 app = Flask(__name__)
 # DATABASE_URL lets the test suite swap in a throwaway database
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///app.db')
@@ -21,7 +22,6 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.json.compact = False  # readable JSON responses
 
 migrate = Migrate(app, db)
-
 db.init_app(app)
 
 # One schema instance per use
@@ -34,9 +34,9 @@ exercise_detail_schema = ExerciseDetailSchema()
 workout_exercise_schema = WorkoutExerciseSchema()
 
 
-# Error handlers
-# ----------------------
+# --- Helpers and error handlers ---
 def error_response(message, status):
+    """Return {"error": message} with the given status code."""
     return make_response({'error': message}, status)
 
 
@@ -67,7 +67,7 @@ def handle_method_not_allowed(_err):
 def save(obj):
     """Add obj and commit. Returns an error response on failure, otherwise None.
 
-    ValueError  -> a model @validates rule rejected the data (400)
+    ValueError     -> a model @validates rule rejected the data (400)
     IntegrityError -> a database constraint rejected the data (409)
     """
     try:
@@ -82,16 +82,17 @@ def save(obj):
     return None
 
 
-# Workouts
-# ------------
+# --- Workouts ---
 @app.route('/workouts', methods=['GET'])
 def get_workouts():
+    """List all workouts, newest first."""
     workouts = Workout.query.order_by(Workout.date.desc(), Workout.id).all()
     return make_response(workouts_schema.dump(workouts), 200)
 
 
 @app.route('/workouts/<int:id>', methods=['GET'])
 def get_workout(id):
+    """Show one workout with its exercises (reps, sets, duration)."""
     workout = db.session.get(Workout, id)
     if workout is None:
         return error_response(f'Workout {id} not found', 404)
@@ -100,6 +101,7 @@ def get_workout(id):
 
 @app.route('/workouts', methods=['POST'])
 def create_workout():
+    """Create a workout."""
     data = workout_schema.load(get_json_body())
     try:
         workout = Workout(**data)
@@ -113,25 +115,26 @@ def create_workout():
 
 @app.route('/workouts/<int:id>', methods=['DELETE'])
 def delete_workout(id):
+    """Delete a workout; the cascade also removes its WorkoutExercises."""
     workout = db.session.get(Workout, id)
     if workout is None:
         return error_response(f'Workout {id} not found', 404)
-    # The relationship cascade also deletes this workout's WorkoutExercises
     db.session.delete(workout)
     db.session.commit()
     return make_response('', 204)
 
 
-# Exercises
-# ---------------
+# --- Exercises ---
 @app.route('/exercises', methods=['GET'])
 def get_exercises():
+    """List all exercises alphabetically."""
     exercises = Exercise.query.order_by(Exercise.name).all()
     return make_response(exercises_schema.dump(exercises), 200)
 
 
 @app.route('/exercises/<int:id>', methods=['GET'])
 def get_exercise(id):
+    """Show one exercise with the workouts it appears in."""
     exercise = db.session.get(Exercise, id)
     if exercise is None:
         return error_response(f'Exercise {id} not found', 404)
@@ -140,10 +143,13 @@ def get_exercise(id):
 
 @app.route('/exercises', methods=['POST'])
 def create_exercise():
+    """Create an exercise; names must be unique (case-insensitive)."""
     data = exercise_schema.load(get_json_body())
 
-    # Friendly duplicate check (case-insensitive); the unique constraint is the backstop
-    duplicate = Exercise.query.filter(db.func.lower(Exercise.name) == data['name'].lower()).first()
+    # Friendly duplicate check; the unique constraint is the backstop
+    duplicate = Exercise.query.filter(
+        db.func.lower(Exercise.name) == data['name'].lower()
+    ).first()
     if duplicate:
         return error_response(f"An exercise named '{duplicate.name}' already exists.", 409)
 
@@ -159,22 +165,22 @@ def create_exercise():
 
 @app.route('/exercises/<int:id>', methods=['DELETE'])
 def delete_exercise(id):
+    """Delete an exercise; the cascade also removes its WorkoutExercises."""
     exercise = db.session.get(Exercise, id)
     if exercise is None:
         return error_response(f'Exercise {id} not found', 404)
-    # The relationship cascade also deletes this exercise's WorkoutExercises
     db.session.delete(exercise)
     db.session.commit()
     return make_response('', 204)
 
 
-# Adding an exercise to a workout
-# -------------------------------------
+# --- Adding an exercise to a workout ---
 @app.route(
     '/workouts/<int:workout_id>/exercises/<int:exercise_id>/workout_exercises',
     methods=['POST'],
 )
 def add_exercise_to_workout(workout_id, exercise_id):
+    """Link an existing exercise to a workout with reps, sets and/or duration."""
     workout = db.session.get(Workout, workout_id)
     if workout is None:
         return error_response(f'Workout {workout_id} not found', 404)
